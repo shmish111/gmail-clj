@@ -10,7 +10,6 @@
            (java.net URLEncoder)))
 
 (def base-url "https://www.googleapis.com/gmail/v1")
-(def scopes ["https://www.googleapis.com/auth/gmail.modify"])
 
 (def #^{:dynamic true} *client-id* nil)
 (def #^{:dynamic true} *client-secret* nil)
@@ -44,13 +43,6 @@
     url
     (str base-url url)))
 
-(defn- check-auth
-  "Checks for auth token."
-  [token]
-  (if (empty? token)
-    (throw (Exception. "Missing authentication token!"))
-    true))
-
 (defn- clean-params
   "Removes any nil params."
   [params]
@@ -80,23 +72,29 @@
     (request-auth))
   (:token *access-token*))
 
+(defn- bytes->clj
+  [bytes]
+  (-> bytes
+      bs/to-string
+      json/parse-string
+      walk/keywordize-keys))
+
 (defn api-middleware
   "middleware for making API requests"
   [client]
-  (fn [req]
+  (fn [{:keys [as request-timeout]
+        :or {as :json request-timeout 2000}
+        :as req}]
     (-> (client (-> req
+                    (update-in [:query-params] clean-params)
                     (update-in [:url] prepend-url)
+                    (assoc :as as)
                     (assoc :oauth-token (get-token))
-                    (assoc :as :json)
-                    (assoc :request-timeout 2000)
-                    (update-in [:query-params] clean-params)))
+                    (assoc :request-timeout request-timeout)))
         (d/chain (fn [{:keys [body]}] body))
         (d/catch Exception
                  (fn [e]
-                   (let [{:keys [status] :as rsp} (update-in (ex-data e) [:body] #(-> %
-                                                                                      bs/to-string
-                                                                                      json/parse-string
-                                                                                      walk/keywordize-keys))]
+                   (let [{:keys [status] :as rsp} (update-in (ex-data e) [:body] bytes->clj)]
                      (d/error-deferred (ex-info (str "status: " status) rsp))))))))
 
 (defmulti api-request (fn [method _ _] method))
@@ -138,43 +136,26 @@
 (defmacro address [& args]
   `(new InternetAddress ~@args))
 
-(defn force-address [addrs]
-  (let [addrs (if (not (vector? addrs))
-                (vector addrs)
-                addrs)]
-    (map #(if (string? %) (address %) %) addrs)))
-
-(defn mime->map
-  "Takes a mime-formated message and returns a map of the data."
-  [msg]
-  (let [session (Session/getDefaultInstance (java.util.Properties.))
-        msg (if (string? msg)
-              (->> (.getBytes msg)
-                   clojure.java.io/input-stream
-                   (MimeMessage. session))
-              msg)]
-    {:headers (.getAllHeaders msg)
-     :to      (InternetAddress/toString (.getRecipients msg Message$RecipientType/TO))
-     :cc      (InternetAddress/toString (.getRecipients msg Message$RecipientType/CC))
-     :bcc     (InternetAddress/toString (.getRecipients msg Message$RecipientType/BCC))
-     :from    (InternetAddress/toString (.getFrom msg))
-     :date    (.getSentDate msg)
-     :subject (.getSubject msg)
-     :content (.getContent msg)}))
+(defn addresses [addrs]
+  (->> addrs
+       vector
+       flatten
+       (map #(address %))))
 
 (defn map->mime
   "Takes a map and returns a mime-formatted object."
-  [msg]
-  (let [session (Session/getDefaultInstance (java.util.Properties.))]
-    (doto (MimeMessage. session)
-      (.setFrom (address "me@gmail.com"))
-      (.addRecipient Message$RecipientType/TO (address (:to msg)))
-      ;(.addRecipient Message$RecipientType/CC (address (:cc msg)))
-      ;(.addRecipient Message$RecipientType/BCC (address (:bcc msg)))
-      (.setSubject (:subject msg))
-      (.setText (:body msg)))))
+  [{:keys [to cc bcc from subject body] :as msg}]
+  (let [session (Session/getDefaultInstance (java.util.Properties.))
+        message (MimeMessage. session)]
+    (when from (.setFrom message (address from)))
+    (when to (.addRecipients message Message$RecipientType/TO (into-array (addresses to))))
+    (when cc (.addRecipients message Message$RecipientType/CC (into-array (addresses cc))))
+    (when bcc (.addRecipients message Message$RecipientType/BCC (into-array (addresses bcc))))
+    (when subject (.setSubject message subject))
+    (when body (.setText message body))
+    message))
 
-; Users.drafts
+; https://developers.google.com/gmail/api/v1/reference/users/drafts
 
 (defn draft-create
   "Create a draft with the DRAFT label."
@@ -210,10 +191,9 @@
 (defn draft-send
   "Send a draft via the message-id."
   [message-id]
-  (let []
-    (api-request :post-json "/users/me/drafts/send" {:id message-id})))
+  (api-request :post-json "/users/me/drafts/send" {:id message-id}))
 
-; Users.history
+; https://developers.google.com/gmail/api/v1/reference/users/history
 
 (defn history-list
   "Pull a list of items from a user's history."
@@ -225,7 +205,7 @@
                 :labelId        labelId}]
     (api-request :get "/users/me/history" params)))
 
-; Users.labels
+; https://developers.google.com/gmail/api/v1/reference/users/labels
 
 (defn label-create
   "Creates a new label."
@@ -265,7 +245,7 @@
   []
   (throw (Exception. "Not yet implemented.")))
 
-; Users.messages
+; https://developers.google.com/gmail/api/v1/reference/users/messages
 
 (defn message-list
   "Returns a list of messages based on a given query."
@@ -310,7 +290,7 @@
         b64 (str->b64 bytes)]
     (api-request :post-json "/users/me/messages/send" {:raw b64})))
 
-; Users.threads
+; https://developers.google.com/gmail/api/v1/reference/users/threads
 
 (defn thread-get
   "Returns a specific thread."
