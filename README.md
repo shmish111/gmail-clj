@@ -38,6 +38,26 @@ This library takes your API information and will do an authorization based on a 
 
 To generate the refresh token you need to write your own interface with the Google OAuth endpoint, but for development and testing I've included an HTML file that does the basic OAuth handshake and returns the refresh token: [/resources/index.html](https://github.com/mikeflynn/gmail-clj/blob/master/resources/index.html).
 
+## API methods
+
+All API calls return a [Manifold deferred](https://github.com/ztellman/manifold) which you can `deref` as the simplest operation.
+
+Errors are Manifold `error-deferred` containing an `ExceptionInfo` with the response status as the message and the whole response as the `ex-data`. 
+
+## Messages
+
+```clojure
+@(message-get "14f93683f441c8e4")
+
+;; or use some manifold async goodness
+
+(-> (d/chain (message-get "14f93683f441c8e4")
+             #(-> % :payload :body :data))
+    (d/catch Exception (fn [_] ""))
+    
+;; the above returns a deferred whose realised value will be either the body of the message or an empty string
+```
+
 ## To Do
 
 Here's a few things I haven't gotten to yet, mostly because I didn't need them in my specific use case. If you'd like to dive in an help on these, that would much appreciated!
